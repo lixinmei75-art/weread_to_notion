@@ -139,16 +139,16 @@ def insert_to_notion(bookName, bookId, cover, sort, author, isbn, rating, catego
         cover = "https://www.notion.so/icons/book_gray.svg"
     parent = {"database_id": database_id, "type": "database_id"}
     properties = {
-        "BookName": get_title(bookName),
+        "书名": get_title(bookName),
         "BookId": get_rich_text(bookId),
         "ISBN": get_rich_text(isbn),
         "URL": get_url(
             f"https://weread.qq.com/web/reader/{calculate_book_str_id(bookId)}"
         ),
-        "Author": get_rich_text(author),
-        "Sort": get_number(sort),
-        "Rating": get_number(rating),
-        "Cover": get_file(cover),
+        "作者": get_rich_text(author),
+        "分类": get_number(sort),
+        "推荐值": get_number(rating),
+        "封面": get_file(cover),
     }
     if categories != None:
         properties["Categories"] = get_multi_select(categories)
