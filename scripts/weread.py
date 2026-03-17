@@ -11,7 +11,6 @@ from http.cookies import SimpleCookie
 from datetime import datetime
 import hashlib
 from dotenv import load_dotenv
-import os
 from retrying import retry
 from utils import (
     get_callout,
@@ -28,6 +27,7 @@ from utils import (
     get_title,
     get_url,
 )
+
 load_dotenv()
 WEREAD_URL = "https://weread.qq.com/"
 WEREAD_NOTEBOOKS_URL = "https://weread.qq.com/api/user/notebook"
@@ -58,7 +58,6 @@ def get_bookmark_list(bookId):
     params = dict(bookId=bookId)
     r = session.get(WEREAD_BOOKMARKLIST_URL, params=params)
     if r.ok:
-        print(r.json())
         updated = r.json().get("updated")
         updated = sorted(
             updated,
@@ -108,6 +107,7 @@ def get_review_list(bookId):
 
 def check(bookId):
     """检查是否已经插入过 如果已经插入了就删除"""
+    # 这里保持英文 BookId，因为它通常作为隐藏 ID 使用，不建议汉化
     filter = {"property": "BookId", "rich_text": {"equals": bookId}}
     response = client.databases.query(database_id=database_id, filter=filter)
     for result in response["results"]:
@@ -138,25 +138,33 @@ def insert_to_notion(bookName, bookId, cover, sort, author, isbn, rating, catego
     if not cover or not cover.startswith("http"):
         cover = "https://www.notion.so/icons/book_gray.svg"
     parent = {"database_id": database_id, "type": "database_id"}
+    
+    # --- 汉化字段开始 ---
     properties = {
         "书名": get_title(bookName),
         "BookId": get_rich_text(bookId),
         "ISBN": get_rich_text(isbn),
-        "URL": get_url(
+        "链接": get_url(
             f"https://weread.qq.com/web/reader/{calculate_book_str_id(bookId)}"
         ),
         "作者": get_rich_text(author),
-        "分类": get_number(sort),
+        "分类排序": get_number(sort),
         "推荐值": get_number(rating),
         "封面": get_file(cover),
     }
     if categories != None:
-        properties["Categories"] = get_multi_select(categories)
+        properties["分类"] = get_multi_select(categories)
+        
     read_info = get_read_info(bookId=bookId)
     if read_info != None:
         markedStatus = read_info.get("markedStatus", 0)
         readingTime = read_info.get("readingTime", 0)
         readingProgress = read_info.get("readingProgress", 0)
+        
+        # 汉化状态逻辑
+        properties["状态"] = get_select("已读完" if markedStatus == 4 else "在读")
+        
+        # 格式化阅读时长
         format_time = ""
         hour = readingTime // 3600
         if hour > 0:
@@ -164,21 +172,22 @@ def insert_to_notion(bookName, bookId, cover, sort, author, isbn, rating, catego
         minutes = readingTime % 3600 // 60
         if minutes > 0:
             format_time += f"{minutes}分"
-        properties["Status"] = get_select("读完" if markedStatus == 4 else "在读")
-        properties["ReadingTime"] = get_rich_text(format_time)
-        properties["Progress"] = get_number(readingProgress)
+        properties["阅读时长"] = get_rich_text(format_time)
+        
+        # 阅读进度
+        properties["阅读进度"] = get_number(readingProgress)
+        
         if "finishedDate" in read_info:
-            properties["Date"] = get_date(
+            properties["完成日期"] = get_date(
                 datetime.utcfromtimestamp(read_info.get("finishedDate")).strftime(
                     "%Y-%m-%d %H:%M:%S"
                 )
             )
+    # --- 汉化字段结束 ---
 
     icon = get_icon(cover)
-    # notion api 限制100个block
     response = client.pages.create(parent=parent, icon=icon,cover=icon, properties=properties)
-    id = response["id"]
-    return id
+    return response["id"]
 
 
 def add_children(id, children):
@@ -215,10 +224,11 @@ def get_notebooklist():
 
 def get_sort():
     """获取database中的最新时间"""
-    filter = {"property": "Sort", "number": {"is_not_empty": True}}
+    # 这里的 property 名必须与 insert_to_notion 中的“分类排序”一致
+    filter = {"property": "分类排序", "number": {"is_not_empty": True}}
     sorts = [
         {
-            "property": "Sort",
+            "property": "分类排序",
             "direction": "descending",
         }
     ]
@@ -226,7 +236,7 @@ def get_sort():
         database_id=database_id, filter=filter, sorts=sorts, page_size=1
     )
     if len(response.get("results")) == 1:
-        return response.get("results")[0].get("properties").get("Sort").get("number")
+        return response.get("results")[0].get("properties").get("分类排序").get("number")
     return 0
 
 
@@ -234,7 +244,6 @@ def get_children(chapter, summary, bookmark_list):
     children = []
     grandchild = {}
     if chapter != None:
-        # 添加目录
         children.append(get_table_of_contents())
         d = {}
         for data in bookmark_list:
@@ -244,7 +253,6 @@ def get_children(chapter, summary, bookmark_list):
             d[chapterUid].append(data)
         for key, value in d.items():
             if key in chapter:
-                # 添加章节
                 children.append(
                     get_heading(
                         chapter.get(key).get("level"), chapter.get(key).get("title")
@@ -264,9 +272,7 @@ def get_children(chapter, summary, bookmark_list):
                 if i.get("abstract") != None and i.get("abstract") != "":
                     quote = get_quote(i.get("abstract"))
                     grandchild[len(children) - 1] = quote
-
     else:
-        # 如果没有章节信息
         for data in bookmark_list:
             markText = data.get("markText")
             for i in range(0, len(markText) // 2000 + 1):
@@ -296,13 +302,11 @@ def get_children(chapter, summary, bookmark_list):
 
 def transform_id(book_id):
     id_length = len(book_id)
-
     if re.match("^\d*$", book_id):
         ary = []
         for i in range(0, id_length, 9):
             ary.append(format(int(book_id[i : min(i + 9, id_length)]), "x"))
         return "3", ary
-
     result = ""
     for i in range(id_length):
         result += format(ord(book_id[i]), "x")
@@ -316,67 +320,33 @@ def calculate_book_str_id(book_id):
     result = digest[0:3]
     code, transformed_ids = transform_id(book_id)
     result += code + "2" + digest[-2:]
-
     for i in range(len(transformed_ids)):
         hex_length_str = format(len(transformed_ids[i]), "x")
         if len(hex_length_str) == 1:
             hex_length_str = "0" + hex_length_str
-
         result += hex_length_str + transformed_ids[i]
-
         if i < len(transformed_ids) - 1:
             result += "g"
-
     if len(result) < 20:
         result += digest[0 : 20 - len(result)]
-
     md5 = hashlib.md5()
     md5.update(result.encode("utf-8"))
     result += md5.hexdigest()[0:3]
     return result
 
 
-def try_get_cloud_cookie(url, id, password):
-    if url.endswith("/"):
-        url = url[:-1]
-    req_url = f"{url}/get/{id}"
-    data = {"password": password}
-    result = None
-    response = requests.post(req_url, data=data)
-    if response.status_code == 200:
-        data = response.json()
-        cookie_data = data.get("cookie_data")
-        if cookie_data and "weread.qq.com" in cookie_data:
-            cookies = cookie_data["weread.qq.com"]
-            cookie_str = "; ".join(
-                [f"{cookie['name']}={cookie['value']}" for cookie in cookies]
-            )
-            result = cookie_str
-    return result
-
-
 def get_cookie():
-    url = os.getenv("CC_URL")
-    if not url:
-        url = "https://cookiecloud.malinkang.com/"
-    id = os.getenv("CC_ID")
-    password = os.getenv("CC_PASSWORD")
     cookie = os.getenv("WEREAD_COOKIE")
-    if url and id and password:
-        cookie = try_get_cloud_cookie(url, id, password)
     if not cookie or not cookie.strip():
         raise Exception("没有找到cookie，请按照文档填写cookie")
     return cookie
-    
 
 
 def extract_page_id():
-    url = os.getenv("NOTION_PAGE")
+    # 修复报错逻辑：同时兼容 NOTION_PAGE 和 NOTION_DATABASE_ID
+    url = os.getenv("NOTION_PAGE") or os.getenv("NOTION_DATABASE_ID")
     if not url:
-        url = os.getenv("NOTION_DATABASE_ID")
-    if not url:
-        raise Exception("没有找到NOTION_PAGE，请按照文档填写")
-    # 正则表达式匹配 32 个字符的 Notion page_id
+        raise Exception("没有找到 Notion ID，请检查 GitHub Secrets 中的变量设置")
     match = re.search(
         r"([a-f0-9]{32}|[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})",
         url,
